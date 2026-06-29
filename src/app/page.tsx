@@ -1,22 +1,11 @@
 "use client";
 
 export const dynamic = "force-static";
-import { useMemo, useRef, useState, type RefObject } from "react";
+import { useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { buildChartPayload, buildDashboardSnapshot, buildExcelExportData, getMetricColumnIndex, normalizeSheetRows } from "@/lib/dashboard-data.mjs";
 
-const PALETTE = [
-  "#6366F1",
-  "#10B981",
-  "#F59E0B",
-  "#EF4444",
-  "#0EA5E9",
-  "#8B5CF6",
-  "#EC4899",
-  "#14B8A6",
-  "#F97316",
-  "#84CC16",
-];
+
 
 type RowData = Array<string | number | null | undefined>;
 
@@ -318,14 +307,136 @@ export default function Home() {
     }
   };
 
-  const saveChart = (ref: React.RefObject<HTMLDivElement | null>, name: string) => {
+  const saveChart = async (ref: React.RefObject<HTMLDivElement | null>, name: string) => {
     if (!ref.current) return;
-    const svgMarkup = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800"><rect width="100%" height="100%" fill="white"/><text x="40" y="60" font-size="28" font-family="Segoe UI">${name}</text></svg>`;
-    const blob = new Blob([svgMarkup], { type: "image/svg+xml;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = Object.assign(document.createElement("a"), { href: url, download: name });
-    link.click();
-    URL.revokeObjectURL(url);
+
+    const svgEl = ref.current.querySelector("svg");
+
+    // Helper: download blob dengan nama file
+    const downloadBlob = (blob: Blob, downloadName: string) => {
+      const url = URL.createObjectURL(blob);
+      const link = Object.assign(document.createElement("a"), { href: url, download: downloadName });
+      link.click();
+      URL.revokeObjectURL(url);
+    };
+
+    // Fallback: kalau SVG tidak ditemukan, unduh sebagai SVG (hindari file PNG korup)
+    if (!svgEl) {
+      const svgMarkup = ref.current.innerHTML;
+      const blob = new Blob([svgMarkup], { type: "image/svg+xml;charset=utf-8" });
+      downloadBlob(blob, name.replace(/\.(png|jpg|jpeg|webp)$/i, ".svg"));
+      return;
+    }
+
+    // Ukuran output: guard agar tidak jadi 0 di device tertentu
+    const rect = ref.current.getBoundingClientRect();
+    const widthFromRect = rect.width > 1 ? rect.width : 800;
+    const heightFromRect = rect.height > 1 ? rect.height : 420;
+
+    // Guard ekstra: pastikan integer & minimal size supaya canvas tidak error/0-byte
+    const width = Math.max(480, Math.floor(widthFromRect));
+    const height = Math.max(280, Math.floor(heightFromRect));
+
+    if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+      // Kalau ukuran invalid, langsung fallback ke SVG
+      const serializer = new XMLSerializer();
+      const svgText = serializer.serializeToString(svgEl);
+      const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
+      downloadBlob(blob, name.replace(/\.(png|jpg|jpeg|webp)$/i, ".svg"));
+      return;
+    }
+
+    const downloadSvgFallback = () => {
+      const serializer = new XMLSerializer();
+      let svgText = serializer.serializeToString(svgEl);
+
+      // Pastikan ada namespace + explicit width/height (khusus iOS/Safari)
+      if (!svgText.includes("xmlns=\"http://www.w3.org/2000/svg\"")) {
+        svgText = svgText.replace(/<svg/, '<svg xmlns="http://www.w3.org/2000/svg"');
+      }
+      svgText = svgText.replace(
+        /<svg([^>]*)>/,
+        (m, attrs) => {
+          const hasWidth = /\bwidth=/.test(attrs);
+          const hasHeight = /\bheight=/.test(attrs);
+          const widthAttr = hasWidth ? "" : ` width=\"${width}\"`;
+          const heightAttr = hasHeight ? "" : ` height=\"${height}\"`;
+          return `<svg${attrs}${widthAttr}${heightAttr}>`;
+        }
+      );
+
+      const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
+      downloadBlob(blob, name.replace(/\.(png|jpg|jpeg|webp)$/i, ".svg"));
+    };
+
+    try {
+      const serializer = new XMLSerializer();
+      let svgText = serializer.serializeToString(svgEl);
+
+      // Tambahkan width/height di root SVG supaya rendering konsisten (terutama iOS/Safari)
+      // Root svg bisa berbentuk: <svg viewBox="..." ...>
+      if (/^\s*<svg[\s>]/.test(svgText) || svgText.includes("<svg")) {
+        svgText = svgText.replace(
+          /<svg([^>]*)>/,
+          (m, attrs) => {
+            const hasWidth = /\bwidth=/.test(attrs);
+            const hasHeight = /\bheight=/.test(attrs);
+            const widthAttr = hasWidth ? "" : ` width=\"${width}\"`;
+            const heightAttr = hasHeight ? "" : ` height=\"${height}\"`;
+            return `<svg${attrs}${widthAttr}${heightAttr}>`;
+          }
+        );
+      }
+
+      // Pastikan ada namespace (beberapa serializer kadang kurang ramah untuk Image)
+      if (!svgText.includes("xmlns=\"http://www.w3.org/2000/svg\"")) {
+        svgText = svgText.replace(/<svg/, '<svg xmlns=\"http://www.w3.org/2000/svg\"');
+      }
+
+      const svgBlob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
+      const svgUrl = URL.createObjectURL(svgBlob);
+
+      const img = new Image();
+      img.decoding = "async";
+
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = reject;
+        img.src = svgUrl;
+      });
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas 2D context not available");
+
+      // Background putih supaya terlihat konsisten
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, width, height);
+
+      ctx.drawImage(img, 0, 0, width, height);
+
+      const pngBlob: Blob | null = await new Promise((resolve) =>
+        canvas.toBlob((b) => resolve(b), "image/png")
+      );
+
+      URL.revokeObjectURL(svgUrl);
+
+      // Kalau toBlob gagal (device tertentu), langsung fallback ke SVG
+      if (!pngBlob || pngBlob.size === 0) {
+        throw new Error("Failed to create valid PNG blob");
+      }
+
+      const pngUrl = URL.createObjectURL(pngBlob);
+      const link = Object.assign(document.createElement("a"), { href: pngUrl, download: name });
+      link.click();
+      URL.revokeObjectURL(pngUrl);
+    } catch (e) {
+      console.warn("saveChart PNG failed, fallback to SVG", e);
+      downloadSvgFallback();
+    }
   };
 
   const downloadExcel = async () => {
@@ -338,16 +449,26 @@ export default function Home() {
     try {
       const ExcelJS = (await import("exceljs")).default;
       const workbook = new ExcelJS.Workbook();
-      const exportData = (buildExcelExportData as unknown as (args: any) => any)({
-        analysisData,
-        chartPayload,
-        header: header as any,
-        sourceRows: mergedData as any,
+      const exportData = (buildExcelExportData as unknown as (args: { 
+        analysisData: SummaryRow[];
+        chartPayload: unknown;
 
-        selectedYear,
-        selectedCategory,
-        selectedMetric,
-      });
+        header: string[];
+        sourceRows: RowData[][];
+        selectedYear: string;
+        selectedCategory: string;
+        selectedMetric: string;
+      }) => { sheet1Rows: Array<Array<string | number>>; sheet2Rows: Array<Array<string | number>> })(
+        {
+          analysisData,
+          chartPayload,
+          header,
+          sourceRows: mergedData,
+          selectedYear,
+          selectedCategory,
+          selectedMetric,
+        }
+      );
 
 
 
@@ -357,12 +478,12 @@ export default function Home() {
 
 
       const sheet = workbook.addWorksheet("Sheet 1");
-      exportData.sheet1Rows.forEach((row: any[]) => sheet.addRow(row));
+      exportData.sheet1Rows.forEach((row) => sheet.addRow(row));
 
 
       if (exportData.sheet2Rows.length) {
         const sourceSheet = workbook.addWorksheet("Sheet 2");
-        exportData.sheet2Rows.forEach((row: any[]) => sourceSheet.addRow(row));
+        exportData.sheet2Rows.forEach((row) => sourceSheet.addRow(row));
       }
 
 
